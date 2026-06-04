@@ -53,4 +53,4 @@ def main(host: str, port: int, chat: bool=False, chatProb: float=0.1) -> None:
         log("connection closed")
 
 if __name__ == "__main__":
-    main(host="gpn-tron.duckdns.org", port=4000, chat=True)
+    main(host="151.216.211.107", port=4000, chat=True, chatProb=0.05)
