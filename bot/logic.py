@@ -4,9 +4,6 @@ from random import choice
 from time import time
 from copy import deepcopy
 
-# local
-from utils import DIRECTIONS, randMove
-
 class Player:
     def __init__(self, pID: str, name: str, posX: str=None, posY: str=None) -> None:
         """Creates a player object."""
@@ -46,6 +43,8 @@ class GameHandler:
         self.sizeY = int(sizeY)
         self.grid = [[" " for _ in range(int(sizeX))] for _ in range(int(sizeY))]
         self.players: dict[str, Player] = {}
+        # per-player spiral state: { rotation: 1|-1, leg_steps: int, steps_in_leg: int, legs_done: int }
+        self.spiral_state: dict[str, dict] = {}
         self.myID = pID
         self.startTime = time()
 
@@ -63,10 +62,14 @@ class GameHandler:
             self.grid[int(posY)][int(posX)] = pID
         else:
             self.players[pID] = Player(pID, name)
+        # initialize spiral state (start clockwise)
+        self.spiral_state[pID] = {"rotation": 1, "leg_steps": 1, "steps_in_leg": 0, "legs_done": 0}
 
     def remPlayer(self, pID: str) -> None:
         """Removes a player from the game."""
         self.players.pop(pID, None)
+        # clean up spiral state
+        self.spiral_state.pop(pID, None)
         for y in range(self.sizeY):
             for x in range(self.sizeX):
                 if self.grid[y][x] == pID:
@@ -101,58 +104,163 @@ class GameHandler:
         """Moves the player and returns the move."""
         if pID is None:
             pID = self.myID
-        newMove = self.calcMoveV2(pID)
+        newMove = self.strat_spiral(pID)
         self.players[pID].dir = newMove
         return newMove
 
-    def calcMoveV1(self, pID: str) -> str:
-        """DEPRECATED: Calculates the next move for a player based on random."""
-        return randMove(self.players[pID].dir)
+    def strat_avoid(self, pID: str=None) -> str:
+        """A simple strategy that tries to avoid other players by making moves in the direction with the most free cells.
+        First the quadrants with respect to the player are checked as an overall metric for the grid, then based on the quadrant one of the two corresponding directions is chosen."""
+        if pID is None:
+            pID = self.myID
+        quadrants = self.getFreeCells_Quadrants(pID)
+        directions = self.getFreeCells_Directions(pID)
+        bestQuadrant: tuple[str, str] = max(quadrants, key=quadrants.get)
+        if directions[bestQuadrant[0]] == 0 and directions[bestQuadrant[1]] == 0: # edge case where no move can be done in the best quadrant
+            return self.randMove(pID)
+        return bestQuadrant[0] if directions[bestQuadrant[0]] >= directions[bestQuadrant[1]] else bestQuadrant[1]
 
-    def calcMoveV2(self, pID: str) -> str: # exactly the same as serverside bots
-        """Calculates the next move for a player based on random, but doesnt allow moves that would result in death."""
-        x, y = self.players[pID].getPos()
-        x, y = int(x), int(y)
-        possibleMoves = []
-        if y == 0 and self.grid[self.sizeY - 1][x] == " ":
-            possibleMoves.append("up")
-        if y > 0 and self.grid[y - 1][x] == " ":
-            possibleMoves.append("up")
-        if x == 0 and self.grid[y][self.sizeX - 1] == " ":
-            possibleMoves.append("left")
-        if x > 0 and self.grid[y][x - 1] == " ":
-            possibleMoves.append("left")
-        if y == self.sizeY - 1 and self.grid[0][x] == " ":
-            possibleMoves.append("down")
-        if y < self.sizeY - 1 and self.grid[y + 1][x] == " ":
-            possibleMoves.append("down")
-        if x == self.sizeX - 1 and self.grid[y][0] == " ":
-            possibleMoves.append("right")
-        if x < self.sizeX - 1 and self.grid[y][x + 1] == " ":
-            possibleMoves.append("right")
+    def strat_spiral(self, pID: str=None) -> str:
+        """A simple strategy that tries to move in a spiral pattern and switches between clockwise and counterclockwise if the way is blocked."""
+        if pID is None:
+            pID = self.myID
+        player = self.players[pID]
+        # ensure we have spiral state
+        state = self.spiral_state.setdefault(pID, {"rotation": 1, "leg_steps": 1, "steps_in_leg": 0, "legs_done": 0})
+        if player.dir is None:
+            player.dir = "right"
+
+        order = ["up", "right", "down", "left"]  # clockwise index order
+        idx = order.index(player.dir)
+        rot = state["rotation"]
+        leg_steps = state["leg_steps"]
+
+        def can_move(direction: str) -> bool:
+            nx, ny = self.calcnewPos(player.getPos()[0], player.getPos()[1], direction)
+            return self.grid[ny][nx] == " "
+
+        # If we haven't completed the current leg, try to go straight first
+        if state["steps_in_leg"] < leg_steps:
+            if can_move(player.dir):
+                state["steps_in_leg"] += 1
+                return player.dir
+            # straight blocked: attempt to turn according to rotation
+            turn_dir = order[(idx + (1 if rot == 1 else -1)) % 4]
+            if can_move(turn_dir):
+                player.dir = turn_dir
+                state["steps_in_leg"] = 1
+                state["legs_done"] += 1
+                if state["legs_done"] % 2 == 0:
+                    state["leg_steps"] += 1
+                return turn_dir
+            # try flipping rotation
+            rot = -rot
+            state["rotation"] = rot
+            turn_dir2 = order[(idx + (1 if rot == 1 else -1)) % 4]
+            if can_move(turn_dir2):
+                player.dir = turn_dir2
+                state["steps_in_leg"] = 1
+                state["legs_done"] += 1
+                if state["legs_done"] % 2 == 0:
+                    state["leg_steps"] += 1
+                return turn_dir2
+            return self.randMove(pID)
+
+        # leg complete: try to turn according to rotation
+        turn_dir = order[(idx + (1 if rot == 1 else -1)) % 4]
+        if can_move(turn_dir):
+            player.dir = turn_dir
+            state["steps_in_leg"] = 1
+            state["legs_done"] += 1
+            if state["legs_done"] % 2 == 0:
+                state["leg_steps"] += 1
+            return turn_dir
+
+        # flip rotation and try other turn
+        rot = -rot
+        state["rotation"] = rot
+        turn_dir2 = order[(idx + (1 if rot == 1 else -1)) % 4]
+        if can_move(turn_dir2):
+            player.dir = turn_dir2
+            state["steps_in_leg"] = 1
+            state["legs_done"] += 1
+            if state["legs_done"] % 2 == 0:
+                state["leg_steps"] += 1
+            return turn_dir2
+
+        # both turns blocked: try straight as last resort
+        if can_move(player.dir):
+            state["steps_in_leg"] += 1
+            return player.dir
+
+        return self.randMove(pID)
+
+    def getFreeCells_Directions(self, pID: str=None) -> dict[str, int]:
+        """Returns the number of free cells in each direction respective to a player. \\
+        Returned is a dict with keys being (up, right, down, left)."""
+        if pID is None:
+            pID = self.myID
+        px, py = self.players[pID].getPos()
+        px, py = int(px), int(py)
+        freeCells = {"up": 0, "right": 0, "down": 0, "left": 0}
+        for i in range(1, py): # up
+            if self.grid[py - i][px] != " ":
+                break
+            freeCells["up"] += 1
+        for i in range(1, self.sizeX - px): # right
+            if self.grid[py][px + i] != " ":
+                break
+            freeCells["right"] += 1
+        for i in range(1, self.sizeY - py): # down
+            if self.grid[py + i][px] != " ":
+                break
+            freeCells["down"] += 1
+        for i in range(1, px): # left
+            if self.grid[py][px - i] != " ":
+                break
+            freeCells["left"] += 1
+        return freeCells
+
+    def getFreeCells_Quadrants(self, pID: str=None) -> dict[tuple[str, str], int]:
+        """Returns the number of free cells in each Quadrant respective to a player. \\
+        Returned is a dict with keys being 2-tuples for the Quadrants (top-left, top-right, bottom-right, bottom-left)."""
+        if pID is None:
+            pID = self.myID
+        px, py = self.players[pID].getPos()
+        px, py = int(px), int(py)
+        freeCells = {("up", "left"): 0, ("up", "right"): 0, ("down", "right"): 0, ("down", "left"): 0}
+        for x in range(self.sizeX):
+            for y in range(self.sizeY):
+                if self.grid[y][x] != " ":
+                    continue
+                if x < px and y < py:
+                    freeCells[("up", "left")] += 1
+                if x > px and y < py:
+                    freeCells[("up", "right")] += 1
+                if x > px and y > py:
+                    freeCells[("down", "right")] += 1
+                if x < px and y > py:
+                    freeCells[("down", "left")] += 1
+        return freeCells
+
+    def randMove(self, pID: str) -> str:
+        possibleMoves = self.getPossibleMoves(pID)
         return choice(possibleMoves) if possibleMoves else "up" # theres nothing we can do
 
-    def calcMoveV3(self, pID: str) -> str:
-        """Calculates the next move for a player based on counting free cells in each direction straight."""
+    def getPossibleMoves(self, pID: str) -> list[str]:
+        """Returns a list of possible moves for a player."""
         x, y = self.players[pID].getPos()
         x, y = int(x), int(y)
         possibleMoves = []
-        #for dir in set(DIRECTIONS) - set(self.players[pID].dir):
-        dirs: list[str] = list(deepcopy(DIRECTIONS))
-        dirs.remove(self.players[pID].dir)
-        dirs.insert(0, self.players[pID].dir) # pull current direction to front => max will choose current direction first => use max grid space
-        for dir in dirs:
-            freeCells = 0
-            while True:
-                newPosX, newPosY = self.calcnewPos(x, y, dir)
-                if newPosX == x and newPosY == y:
-                    break
-                if self.grid[newPosY][newPosX] != " ":
-                    break
-                freeCells += 1
-            if freeCells > 0:
-                possibleMoves.append((dir, freeCells))
-        return max(possibleMoves, key=lambda x: x[1])[0] if possibleMoves else "up" # theres nothing we can do
+        if self.grid[(y-1) % self.sizeY][x] == " ":
+            possibleMoves.append("up")
+        if self.grid[y][(x-1) % self.sizeX] == " ":
+            possibleMoves.append("left")
+        if self.grid[(y+1) % self.sizeY][x] == " ":
+            possibleMoves.append("down")
+        if self.grid[y][(x+1) % self.sizeX] == " ":
+            possibleMoves.append("right")
+        return possibleMoves
 
 if __name__ == "__main__":
     print("This file is not meant to be run directly")

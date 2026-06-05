@@ -38,11 +38,5 @@ def reverseDir(dir: str) -> str:
     """Returns the opposite direction of the given direction."""
     return DIRECTIONS[(DIRECTIONS.index(dir) + 2) % 4] # depends on the defined order of DIRECTIONS
 
-def randMove(dir: str) -> str:
-    """TEMPORARY: Returns a random direction while avoiding impossible move (180-turn)."""
-    if dir is None:
-        return choice(DIRECTIONS)
-    return choice(tuple(set(DIRECTIONS) - {reverseDir(dir)}))
-
 if __name__ == "__main__":
     print("This file is not meant to be run directly")
